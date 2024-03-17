@@ -1,0 +1,85 @@
+name: CircleCI
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    services:
+      docker:
+        image: buildbot/metabbotcfg
+        options: --user root
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Set up cache
+        uses: actions/cache@v2
+        with:
+          path: .venv
+          key: ${{ runner.os }}-dependencies-${{ hashFiles('requirements-ci.txt', 'requirements-cidocs.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-dependencies-
+
+      - name: Install dependencies
+        run: |
+          env
+          python3.8 -m venv .venv
+          source .venv/bin/activate
+          pip install -U pip setuptools wheel
+          pip install -r requirements-ci.txt
+          pip install -r requirements-cidocs.txt
+          pip install pyinstaller
+
+      - name: Run tests
+        run: |
+          source .venv/bin/activate
+          make docs-release
+          make tarballs
+          pip install -e www/react-base
+          pyinstaller pyinstaller/buildbot-worker.spec
+          SANDBOXED_WORKER_PATH=$(pwd)/dist/buildbot-worker trial --reporter=text --rterrors buildbot.test.integration.interop
+
+      - name: Persist workspace
+        uses: actions/upload-artifact@v2
+        with:
+          name: dist
+          path: dist
+
+      - name: Store docs
+        uses: actions/upload-artifact@v2
+        with:
+          name: docs
+          path: master/docs/_build/html/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download dist
+        uses: actions/download-artifact@v2
+        with:
+          name: dist
+          path: dist
+
+      - name: Set up Docker
+        uses: docker/setup-buildx-action@v1
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v1
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Upload binaries to GitHub release
+        run: |
+          env
+          mv dist/buildbot-worker dist/buildbot-worker-linux-amd64-${GITHUB_REF#refs/tags/}.bin
+          # Assuming `ghr` is available in the Docker image or you might need to install it as part of this step
+          ghr -t ${{ secrets.GITHUB_TOKEN }} -u $GITHUB_REPOSITORY_OWNER -r ${{ github.event.repository.name }} --replace ${{ github.ref_name }} dist/
